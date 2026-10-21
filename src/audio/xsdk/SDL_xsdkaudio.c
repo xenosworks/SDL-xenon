@@ -155,8 +155,18 @@ static void XSDKAUD_CloseDevice(SDL_AudioDevice *device)
     device->hidden = NULL;
 }
 
+// SDL's default asks for TIME_CRITICAL, which reaches the kernel as 16 since xsdk's milestone 55, and the thread then
+// runs ahead of the title's own each time WaitDevice polls: Dusklight's title scene lost 2.5% in its heaviest windows.
+// At NORMAL it ran as fast as before (xsdk:results/2026-10-21-milestone-55-acceptance/README.md).
+static void XSDKAUD_ThreadInit(SDL_AudioDevice *device)
+{
+    (void)device;
+    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_NORMAL);
+}
+
 static bool XSDKAUD_Init(SDL_AudioDriverImpl *impl)
 {
+    impl->ThreadInit = XSDKAUD_ThreadInit;
     impl->OpenDevice = XSDKAUD_OpenDevice;
     impl->WaitDevice = XSDKAUD_WaitDevice;
     impl->GetDeviceBuf = XSDKAUD_GetDeviceBuf;

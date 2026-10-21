@@ -22,54 +22,33 @@
 
 #ifdef SDL_AUDIO_DRIVER_XSDK
 
-/* The Xbox 360's audio through xsdk. The kernel's render driver calls back for a frame every 256 samples at 48 kHz,
-   six channels of big-endian floats one after another, in 5.1 order (xsdk:docs/HARDWARE.md, "Audio"). SDL's device
-   thread fills a ring of such frames, and the callback hands the kernel the oldest, or silence if SDL is behind.
+/* The Xbox 360's audio through xsdk's audio API, which feeds the kernel's render driver frames of 256 samples at 48 kHz,
+   six channels of big-endian floats one after another, in 5.1 order (xsdk:include/xsdk/audio.h). SDL's device thread
+   is the feeder: WaitDevice blocks until the kernel has taken a frame, and PlayDevice lays SDL's mix out in the next. */
 
-   A callback can still be running when unregistering returns: Xenia calls it outside the lock that unregistering
-   takes (xenia:src/xenia/apu/audio_system.cc:120-130). So what callbacks touch is static and never freed; SDL opens
-   the one device once at a time. */
-
-#include "xsdk/kernel.h"
+#include "xsdk/audio.h"
 
 #include "../SDL_sysaudio.h"
 
-#define XSDKAUD_RATE     48000
-#define XSDKAUD_CHANNELS 6
-#define XSDKAUD_SAMPLES  256
-#define XSDKAUD_FLOATS   (XSDKAUD_CHANNELS * XSDKAUD_SAMPLES)
-// Frames queued ahead of the kernel, about 21 ms; the one it last took stays untouched until it asks again.
-#define XSDKAUD_RING 4
+// WaitDevice's longest wait before it looks for a shutdown again; the kernel frees a slot every 5.33 ms.
+#define XSDKAUD_WAIT_MS 100
 
 struct SDL_PrivateAudioData
 {
-    // XSDKAUD_RING frames, then a silent one, in physical memory as the kernel's driver reads them.
-    float *frames;
-    // SDL mixes interleaved here, and PlayDevice lays it out channel after channel in the ring.
+    // SDL mixes interleaved here, and PlayDevice lays it out channel after channel in xsdk's frame.
     float *mix;
-    SDL_AtomicU32 driver;
-    SDL_AtomicInt written;
-    SDL_AtomicInt played;
 };
 
 static struct SDL_PrivateAudioData XSDKAUD_hidden;
 
-// Runs on the kernel's audio thread each time the driver wants a frame.
-static void XSDKAUD_KernelCallback(const Uint32 *context)
+/* The one device, in the driver's format. SDL keeps a driver's spec as the device's (SDL_audio.c:664-665, 716), gives it
+   to SDL_GetAudioDeviceFormat before the device opens (1620), and opens with it when the title asks for none (1811), so
+   SDL, and FAudio's mastering voice by default, mix at 48 kHz in 5.1 without converting. */
+static void XSDKAUD_DetectDevices(SDL_AudioDevice **default_playback, SDL_AudioDevice **default_recording)
 {
-    struct SDL_PrivateAudioData *hidden = (struct SDL_PrivateAudioData *)(uintptr_t)*context;
-    const Uint32 driver = SDL_GetAtomicU32(&hidden->driver);
-    // The first callbacks can come before registration has returned the driver.
-    if (!driver) {
-        return;
-    }
-    const int played = SDL_GetAtomicInt(&hidden->played);
-    const float *frame = hidden->frames + XSDKAUD_RING * XSDKAUD_FLOATS;
-    if (SDL_GetAtomicInt(&hidden->written) != played) {
-        frame = hidden->frames + (played % XSDKAUD_RING) * XSDKAUD_FLOATS;
-        SDL_SetAtomicInt(&hidden->played, played + 1);
-    }
-    (void)XAudioSubmitRenderDriverFrame(driver, frame);
+    (void)default_recording;
+    const SDL_AudioSpec spec = { SDL_AUDIO_F32BE, XSDK_AUDIO_CHANNELS, XSDK_AUDIO_RATE_HZ };
+    *default_playback = SDL_AddAudioDevice(false, DEFAULT_PLAYBACK_DEVNAME, &spec, (void *)((size_t)0x1));
 }
 
 static bool XSDKAUD_OpenDevice(SDL_AudioDevice *device)
@@ -79,41 +58,33 @@ static bool XSDKAUD_OpenDevice(SDL_AudioDevice *device)
     }
     struct SDL_PrivateAudioData *hidden = &XSDKAUD_hidden;
     device->hidden = hidden;
-    SDL_SetAtomicInt(&hidden->written, 0);
-    SDL_SetAtomicInt(&hidden->played, 0);
     // The driver's one format; SDL converts whatever it's given.
     device->spec.format = SDL_AUDIO_F32BE;
-    device->spec.channels = XSDKAUD_CHANNELS;
-    device->spec.freq = XSDKAUD_RATE;
-    device->sample_frames = XSDKAUD_SAMPLES;
+    device->spec.channels = XSDK_AUDIO_CHANNELS;
+    device->spec.freq = XSDK_AUDIO_RATE_HZ;
+    device->sample_frames = XSDK_AUDIO_FRAME_SAMPLES;
     SDL_UpdatedAudioDeviceFormat(device);
 
     hidden->mix = (float *)SDL_malloc(device->buffer_size);
-    const Uint32 frames_bytes = (XSDKAUD_RING + 1) * XSDKAUD_FLOATS * sizeof(float);
-    if (!hidden->frames) {
-        hidden->frames = (float *)MmAllocatePhysicalMemoryEx(0, frames_bytes, PAGE_READWRITE, 0, UINT32_MAX, 0);
+    if (!hidden->mix) {
+        return false;
     }
-    if (!hidden->mix || !hidden->frames) {
-        return SDL_SetError("Couldn't allocate audio frames");
+    const NTSTATUS status = xsdk_audio_open(0);
+    if (!NT_SUCCESS(status)) {
+        return SDL_SetError("xsdk_audio_open failed: 0x%08X", (unsigned)status);
     }
-    SDL_memset(hidden->frames, 0, frames_bytes);
-
-    const XAUDIO_RENDER_DRIVER_CLIENT client = { XSDKAUD_KernelCallback, (Uint32)(uintptr_t)hidden };
-    Uint32 driver = 0;
-    const Uint32 result = XAudioRegisterRenderDriverClient(&client, &driver);
-    if (result != ERROR_SUCCESS) {
-        return SDL_SetError("XAudioRegisterRenderDriverClient failed: 0x%08X", (unsigned)result);
-    }
-    SDL_SetAtomicU32(&hidden->driver, driver);
     return true;
 }
 
+// Blocks until the kernel has taken a frame and a slot is free, or SDL shuts the device down.
 static bool XSDKAUD_WaitDevice(SDL_AudioDevice *device)
 {
-    struct SDL_PrivateAudioData *hidden = device->hidden;
-    while (!SDL_GetAtomicInt(&device->shutdown) &&
-           SDL_GetAtomicInt(&hidden->written) - SDL_GetAtomicInt(&hidden->played) >= XSDKAUD_RING - 1) {
-        SDL_Delay(1);
+    while (!SDL_GetAtomicInt(&device->shutdown)) {
+        float *frame;
+        const NTSTATUS status = xsdk_audio_next_frame(XSDKAUD_WAIT_MS, &frame);
+        if (status != STATUS_IO_TIMEOUT) {
+            return NT_SUCCESS(status);
+        }
     }
     return true;
 }
@@ -125,16 +96,20 @@ static Uint8 *XSDKAUD_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_size)
 
 static bool XSDKAUD_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer, int buffer_size)
 {
-    struct SDL_PrivateAudioData *hidden = device->hidden;
-    const int written = SDL_GetAtomicInt(&hidden->written);
-    float *frame = hidden->frames + (written % XSDKAUD_RING) * XSDKAUD_FLOATS;
+    // WaitDevice found a slot free, as the empty ring had for the first mix.
+    float *frame;
+    const NTSTATUS status = xsdk_audio_next_frame(0, &frame);
+    if (!NT_SUCCESS(status)) {
+        return status == STATUS_IO_TIMEOUT;
+    }
+    volatile float *out = frame;
     const float *mix = (const float *)buffer;
-    for (int sample = 0; sample < XSDKAUD_SAMPLES; sample++) {
-        for (int channel = 0; channel < XSDKAUD_CHANNELS; channel++) {
-            frame[channel * XSDKAUD_SAMPLES + sample] = mix[sample * XSDKAUD_CHANNELS + channel];
+    for (int sample = 0; sample < XSDK_AUDIO_FRAME_SAMPLES; sample++) {
+        for (int channel = 0; channel < XSDK_AUDIO_CHANNELS; channel++) {
+            out[channel * XSDK_AUDIO_FRAME_SAMPLES + sample] = mix[sample * XSDK_AUDIO_CHANNELS + channel];
         }
     }
-    SDL_SetAtomicInt(&hidden->written, written + 1);
+    xsdk_audio_queue_frame();
     return true;
 }
 
@@ -144,28 +119,25 @@ static void XSDKAUD_CloseDevice(SDL_AudioDevice *device)
     if (!hidden) {
         return;
     }
-    const Uint32 driver = SDL_GetAtomicU32(&hidden->driver);
-    if (driver) {
-        SDL_SetAtomicU32(&hidden->driver, 0);
-        (void)XAudioUnregisterRenderDriverClient(driver);
-    }
+    // Fails harmlessly when OpenDevice didn't get as far as opening it.
+    (void)xsdk_audio_close();
     // Only SDL's device thread uses the mix, and it has stopped.
     SDL_free(hidden->mix);
     hidden->mix = NULL;
     device->hidden = NULL;
 }
 
-// SDL's default asks for TIME_CRITICAL, which reaches the kernel as 16 since xsdk's milestone 55, and the thread then
-// runs ahead of the title's own each time WaitDevice polls: Dusklight's title scene lost 2.5% in its heaviest windows.
-// At NORMAL it ran as fast as before (xsdk:results/2026-10-21-milestone-55-acceptance/README.md).
+// SDL's default asks for TIME_CRITICAL, 16 on the console. Left at its default, the thread is raised to +1 by
+// xsdk_audio_next_frame, where a feeder beside a busy thread woke within 3 us of each frame the kernel took
+// (xsdk:docs/HARDWARE.md, "Audio's feeding, milestone 58").
 static void XSDKAUD_ThreadInit(SDL_AudioDevice *device)
 {
     (void)device;
-    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_NORMAL);
 }
 
 static bool XSDKAUD_Init(SDL_AudioDriverImpl *impl)
 {
+    impl->DetectDevices = XSDKAUD_DetectDevices;
     impl->ThreadInit = XSDKAUD_ThreadInit;
     impl->OpenDevice = XSDKAUD_OpenDevice;
     impl->WaitDevice = XSDKAUD_WaitDevice;

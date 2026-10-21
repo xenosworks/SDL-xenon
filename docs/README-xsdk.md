@@ -17,8 +17,13 @@ xsdk's `xsdk_add_xex()`; `test/xsdk` is such a title.
 
 ## Notes
 
--   Audio plays through the kernel's render driver: 6 channels of big-endian floats at 48 kHz, 256 frames at a time,
-    which SDL converts to. There's no recording.
+-   Audio plays through xsdk's audio API (`xsdk/audio.h`), which feeds the kernel's render driver 6 channels of
+    big-endian floats at 48 kHz, 256 frames at a time; SDL converts to them. SDL's device thread is the feeder: it
+    waits in `xsdk_audio_next_frame` until the kernel has taken a frame, 8 frames (43 ms) ahead, and the call raises
+    it to priority +1 the first time, where SDL's default would ask for 16. A stream's callback runs on that thread,
+    at +1, on the hardware thread of the thread that opened the device, as xsdk starts threads where their creator
+    runs. `xsdk_audio_stats` counts the frames the kernel got as silence, as when the device thread falls behind.
+    There's no recording.
 -   Up to four controllers, read with `XamInputGetState` and rumbled with `XamInputSetState`, show up as Xbox 360
     controllers.
 -   `SDL_GetBasePath` returns `game:\`, the folder the title was launched from, and `SDL_GetPrefPath` makes its folders

@@ -1,0 +1,14 @@
+sdl_check's audio broken on purpose: WaitDevice sleeps 10 ms before each wait, so SDL mixes a frame every 10 ms or
+more, the kernel takes one every 5.33 ms, and its silent-frame and 48 kHz checks fail. From SDL-xenon's root, on a
+copy: patch -p1 < test/xsdk/late_wait.patch
+
+--- a/src/audio/xsdk/SDL_xsdkaudio.c
++++ b/src/audio/xsdk/SDL_xsdkaudio.c
+@@ -69,6 +69,7 @@
+ // Blocks until the kernel has taken a frame and a slot is free, or SDL shuts the device down.
+ static bool XSDKAUD_WaitDevice(SDL_AudioDevice *device)
+ {
++    SDL_Delay(10);
+     while (!SDL_GetAtomicInt(&device->shutdown)) {
+         float *frame;
+         const NTSTATUS status = xsdk_audio_next_frame(XSDKAUD_WAIT_MS, &frame);

@@ -31,4 +31,5 @@ xsdk's `xsdk_add_xex()`; `test/xsdk` is such a title.
 -   Threads, timers and time come from xsdk's pthreads and POSIX clocks.
 -   There's no video, render or GPU driver of the console's own; only SDL's dummy and offscreen video drivers. Titles
     draw with xsdk's GPU layer or [vulkan4xenon](https://github.com/xenosworks/vulkan4xenon).
--   `test/xsdk/sdl_check.c` checks the platform's name, paths, timer, threads, controller and audio on the console.
+-   `test/xsdk/sdl_check.c` checks the platform's name, paths, timer, threads, controller and audio on the console;
+    `test/xsdk/late_wait.patch` breaks the audio driver on purpose, so its audio checks fail.

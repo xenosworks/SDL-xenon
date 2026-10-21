@@ -15,6 +15,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "xsdk/audio.h"
 #include "xsdk/kernel.h"
 #include "xsdk/log.h"
 #include "xsdk/splash.h"
@@ -222,7 +223,15 @@ static void check_audio(void)
     xsdk_log_write("sdl: playing a %d Hz tone for %d ms", TONE_HZ, TONE_MS);
     SDL_ResumeAudioStreamDevice(stream);
     SDL_Delay(TONE_MS);
+    XsdkAudioStats stats;
+    xsdk_audio_stats(&stats);
     SDL_DestroyAudioStream(stream);
+    xsdk_log_write("sdl: xsdk handed the kernel %u frames and %u silent ones, %u queued at the fewest, a freed slot "
+                   "filled %u us after at most",
+                   (unsigned)stats.played, (unsigned)stats.silent, (unsigned)stats.fewest_queued,
+                   (unsigned)stats.longest_wait_us);
+    check("sdl: the kernel got no silent frame from the device's opening to the tone's end",
+          stats.played > 0 && stats.silent == 0);
     const Uint64 expected = (Uint64)TONE_RATE * TONE_MS / 1000;
     xsdk_log_write("sdl: the stream asked for %u frames of the tone, %u expected", (unsigned)tone.frames,
                    (unsigned)expected);

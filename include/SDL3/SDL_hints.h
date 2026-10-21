@@ -562,6 +562,20 @@ extern "C" {
 #define SDL_HINT_AUDIO_INCLUDE_MONITORS "SDL_AUDIO_INCLUDE_MONITORS"
 
 /**
+ * A variable that sets the Xbox 360 hardware thread that the xsdk audio
+ * driver's device thread runs on.
+ *
+ * The variable can be set to a hardware thread, "0" to "5". By default the
+ * device thread stays where xsdk starts it, on the hardware thread of the
+ * thread that opened the device.
+ *
+ * This hint should be set before the audio device is opened.
+ *
+ * \since This hint is available in SDL-xenon's xsdk port.
+ */
+#define SDL_HINT_AUDIO_XSDK_HARDWARE_THREAD "SDL_AUDIO_XSDK_HARDWARE_THREAD"
+
+/**
  * A variable controlling whether SDL updates joystick state when getting
  * input events.
  *

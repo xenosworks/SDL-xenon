@@ -27,6 +27,7 @@
    is the feeder: WaitDevice blocks until the kernel has taken a frame, and PlayDevice lays SDL's mix out in the next. */
 
 #include "xsdk/audio.h"
+#include "xsdk/thread.h"
 
 #include "../SDL_sysaudio.h"
 
@@ -129,10 +130,26 @@ static void XSDKAUD_CloseDevice(SDL_AudioDevice *device)
 
 // SDL's default asks for TIME_CRITICAL, 16 on the console. Left at its default, the thread is raised to +1 by
 // xsdk_audio_next_frame, where a feeder beside a busy thread woke within 3 us of each frame the kernel took
-// (xsdk:docs/HARDWARE.md, "Audio's feeding, milestone 58").
+// (xsdk:docs/HARDWARE.md, "Audio's feeding, milestone 58"). The thread moves to the hardware thread the title names in
+// SDL_HINT_AUDIO_XSDK_HARDWARE_THREAD; xsdk starts it on its creator's (xsdk:include/xsdk/thread.h).
 static void XSDKAUD_ThreadInit(SDL_AudioDevice *device)
 {
     (void)device;
+    const char *hint = SDL_GetHint(SDL_HINT_AUDIO_XSDK_HARDWARE_THREAD);
+    if (!hint || !*hint) {
+        return;
+    }
+    char *end = NULL;
+    const long hardware_thread = SDL_strtol(hint, &end, 10);
+    if (*end != '\0' || hardware_thread < 0 || hardware_thread >= XSDK_HARDWARE_THREADS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "xsdk audio: no hardware thread \"%s\"", hint);
+        return;
+    }
+    const NTSTATUS status = xsdk_thread_move((uint32_t)hardware_thread);
+    if (!NT_SUCCESS(status)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "xsdk audio: xsdk_thread_move(%ld) failed: 0x%08X", hardware_thread,
+                    (unsigned)status);
+    }
 }
 
 static bool XSDKAUD_Init(SDL_AudioDriverImpl *impl)

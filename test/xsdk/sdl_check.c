@@ -19,6 +19,7 @@
 #include "xsdk/kernel.h"
 #include "xsdk/log.h"
 #include "xsdk/splash.h"
+#include "xsdk/thread.h"
 
 #define SPLASH_MS       2000
 #define DELAY_MS        100
@@ -28,6 +29,8 @@
 #define TONE_MS         2000
 #define TONE_RATE       48000
 #define TONE_AMPLITUDE  0.25f
+// Where SDL_HINT_AUDIO_XSDK_HARDWARE_THREAD puts the device thread, off the main thread's 0.
+#define TONE_HARDWARE_THREAD 5
 // The console's time base steps in about 20 ns; the kernel's system time, a millisecond at a time.
 #define FINEST_STEP_NS  100000
 #define STEP_READS      1000000
@@ -176,12 +179,15 @@ typedef struct
 {
     float phase;
     Uint64 frames;
+    // The hardware threads the callback ran on, a bit each.
+    Uint32 hardware_threads;
 } Tone;
 
 static void SDLCALL tone_callback(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount)
 {
     (void)total_amount;
     Tone *tone = (Tone *)userdata;
+    tone->hardware_threads |= 1u << xsdk_thread_hardware_thread();
     float samples[512];
     int frames = additional_amount / (int)(2 * sizeof(float));
     while (frames > 0) {
@@ -207,7 +213,10 @@ static void check_audio(void)
     check("sdl: the audio driver is xsdk's", driver && SDL_strcmp(driver, "xsdk") == 0);
 
     const SDL_AudioSpec spec = { SDL_AUDIO_F32, 2, TONE_RATE };
-    Tone tone = { 0.0f, 0 };
+    Tone tone = { 0.0f, 0, 0 };
+    char hardware_thread[4];
+    SDL_snprintf(hardware_thread, sizeof(hardware_thread), "%d", TONE_HARDWARE_THREAD);
+    SDL_SetHint(SDL_HINT_AUDIO_XSDK_HARDWARE_THREAD, hardware_thread);
     SDL_AudioStream *stream =
         SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, tone_callback, &tone);
     check("sdl: an audio stream opens on the default device", stream != NULL);
@@ -237,6 +246,9 @@ static void check_audio(void)
                    (unsigned)expected);
     check("sdl: SDL pulled the tone at 48 kHz, within a tenth", tone.frames >= expected * 9 / 10 &&
                                                                      tone.frames <= expected * 11 / 10);
+    xsdk_log_write("sdl: the device thread ran on hardware threads 0x%02X", (unsigned)tone.hardware_threads);
+    check("sdl: the device thread ran on the hardware thread the hint names",
+          tone.hardware_threads == 1u << TONE_HARDWARE_THREAD);
 }
 
 int main(void)
